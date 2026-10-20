@@ -1,0 +1,35 @@
+# Lazy Overlay PC Link: see README.md.
+[package]
+name = "lazy-overlay-link"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+description = "Lazy Overlay PC Link: the overlay's way onto the streamer's PC, limited to what the streamer lists there"
+
+[lib]
+name = "pclink"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lazy-overlay-link"
+path = "src/main.rs"
+
+# The window only: egui, the file picker and the clipboard. The connection
+# uses no packages: the system's TLS (WinHTTP, OpenSSL) and PC Link's own
+# WebSocket client.
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+rfd = "0.17"
+arboard = { version = "3", default-features = false }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = 3
+debug = false
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
