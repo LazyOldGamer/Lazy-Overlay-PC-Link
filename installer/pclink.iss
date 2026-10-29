@@ -72,5 +72,8 @@ Filename: "{app}\lazy-overlay-link.exe"; Parameters: "--close-to-tray yes"; Flag
 Filename: "{app}\lazy-overlay-link.exe"; Description: "Open PC Link now"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; Asked to close, so its file can go.
+; Asked to close, so its file can go; given ten seconds to finish, then ended,
+; so no file is still open when the files are removed.
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM lazy-overlay-link.exe"; Flags: runhidden; RunOnceId: "ClosePcLink"
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -Command ""Wait-Process -Name 'lazy-overlay-link' -Timeout 10 -ErrorAction SilentlyContinue"""; Flags: runhidden; RunOnceId: "WaitPcLink"
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM lazy-overlay-link.exe"; Flags: runhidden; RunOnceId: "EndPcLink"

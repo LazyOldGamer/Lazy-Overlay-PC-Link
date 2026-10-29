@@ -19,6 +19,7 @@
 //! close_to_tray = yes      closing it keeps PC Link by the clock (Windows)
 //! minimize_to_tray = yes   so does minimizing it (Windows)
 //! confirm_close = yes      ask before PC Link really ends
+//! start_minimized = yes    open minimized (to the clock, when either is ticked)
 //! size = 980, 640          as it was last, kept by the window
 //! position = 100, 80
 //! ```
@@ -119,6 +120,8 @@ pub struct Window {
     pub minimize_to_tray: bool,
     /// Ask before PC Link really ends.
     pub confirm_close: bool,
+    /// Open minimized: to the clock when it closes or minimizes there.
+    pub start_minimized: bool,
     /// Its inner size and outer position as last left, in logical pixels.
     pub size: Option<(u32, u32)>,
     pub position: Option<(i32, i32)>,
@@ -310,6 +313,7 @@ pub fn parse(text: &str) -> Result<Config, Vec<String>> {
                 "close_to_tray" => flag(&mut cfg.window.close_to_tray, &mut errors),
                 "minimize_to_tray" => flag(&mut cfg.window.minimize_to_tray, &mut errors),
                 "confirm_close" => flag(&mut cfg.window.confirm_close, &mut errors),
+                "start_minimized" => flag(&mut cfg.window.start_minimized, &mut errors),
                 "size" => match pair(value, 200..=20000) {
                     Some(v) => cfg.window.size = Some(v),
                     None => errors.push(bad("is a width and height, like 980, 640")),
@@ -318,7 +322,9 @@ pub fn parse(text: &str) -> Result<Config, Vec<String>> {
                     Some(v) => cfg.window.position = Some(v),
                     None => errors.push(bad("is a left and top, like 100, 80")),
                 },
-                _ => errors.push(bad("is not a setting of [window]: close_to_tray, minimize_to_tray, confirm_close, size or position")),
+                _ => errors.push(bad(
+                    "is not a setting of [window]: close_to_tray, minimize_to_tray, confirm_close, start_minimized, size or position",
+                )),
             },
             Section::Folder(Folder { path, subfolders, .. }, _) => match key.as_str() {
                 "path" => *path = full(&mut errors, "must be a full path").unwrap_or_default(),
@@ -674,10 +680,11 @@ impl Config {
         o += &format!("\n[toasts]\nactions = {}\nerrors = {}\n", yes(self.toasts.actions), yes(self.toasts.errors));
         let w = &self.window;
         o += &format!(
-            "\n[window]\nclose_to_tray = {}\nminimize_to_tray = {}\nconfirm_close = {}\n",
+            "\n[window]\nclose_to_tray = {}\nminimize_to_tray = {}\nconfirm_close = {}\nstart_minimized = {}\n",
             yes(w.close_to_tray),
             yes(w.minimize_to_tray),
-            yes(w.confirm_close)
+            yes(w.confirm_close),
+            yes(w.start_minimized)
         );
         if let Some((width, height)) = w.size {
             o += &format!("size = {width}, {height}\n");
@@ -772,12 +779,18 @@ mod tests {
     fn reads_and_writes_folders_file_watches_toasts_and_the_tray() {
         let dir = if cfg!(windows) { r"C:\Clips" } else { "/home/me/clips" };
         let text = format!(
-            "[toasts]\nerrors = no\n[window]\nclose_to_tray = yes\nconfirm_close = yes\nsize = 700, 800\nposition = -1200, 40\n[folder Clips]\npath = {dir}\nsubfolders = yes\n[filewatch Replays]\npath = {dir}\nmatch = .MP4\n"
+            "[toasts]\nerrors = no\n[window]\nclose_to_tray = yes\nconfirm_close = yes\nstart_minimized = yes\nsize = 700, 800\nposition = -1200, 40\n[folder Clips]\npath = {dir}\nsubfolders = yes\n[filewatch Replays]\npath = {dir}\nmatch = .MP4\n"
         );
         let cfg = parse(&text).unwrap();
         assert_eq!(cfg.toasts, Toasts { actions: true, errors: false });
-        let window =
-            Window { close_to_tray: true, confirm_close: true, size: Some((700, 800)), position: Some((-1200, 40)), ..Default::default() };
+        let window = Window {
+            close_to_tray: true,
+            confirm_close: true,
+            start_minimized: true,
+            size: Some((700, 800)),
+            position: Some((-1200, 40)),
+            ..Default::default()
+        };
         assert_eq!((cfg.window, Config::default().window), (window, Window::default()));
         assert_eq!(cfg.folders, vec![Folder { name: "Clips".into(), path: dir.into(), subfolders: true }]);
         assert_eq!(
@@ -801,6 +814,7 @@ mod tests {
             ("[toasts]\nall = yes\n", "line 2: all is not a setting of [toasts]"),
             ("[toasts x]\n", "line 1: [toasts]"),
             ("[window]\nclose_to_tray = maybe\n", "line 2: close_to_tray is yes or no"),
+            ("[window]\nstart_minimized = sometimes\n", "line 2: start_minimized is yes or no"),
             ("[window]\nsize = 640\n", "line 2: size is a width and height"),
             ("[window]\nsize = 10, 760\n", "line 2: size is a width and height"),
             ("[window]\nposition = a, 1\n", "line 2: position is a left and top"),

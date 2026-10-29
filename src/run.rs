@@ -173,16 +173,19 @@ mod win {
     }
 }
 
+// Linux: the processes is_running found, by id (its argument or its comm,
+// procs.rs), sent TERM, or with force KILL.
 #[cfg(not(windows))]
 fn stop_running(s: &Stop) -> Result<String, Refused> {
-    let pkill = crate::os::tool("pkill").ok_or_else(|| Refused::same("pkill is not installed".into()))?;
-    // Linux names a process by its first 15 characters. pkill reads a
-    // pattern: each character is matched as itself, so `obs.bin` is not
-    // `obsXbin` and `a.+` is not every program starting with a.
-    let name: String = s.process.chars().take(15).collect();
-    let name = literal(&name);
-    let status = Command::new(&pkill)
-        .args([if s.force { "-KILL" } else { "-TERM" }, "-x", "--", &name])
+    let kill = crate::os::tool("kill").ok_or_else(|| Refused::same("kill is not installed".into()))?;
+    let ids = procs::ids(&s.process).map_err(|e| Refused::new("could not list programs", format!("could not list programs: {e}")))?;
+    if ids.is_empty() {
+        return Ok("not running".into());
+    }
+    let status = Command::new(&kill)
+        .arg(if s.force { "-KILL" } else { "-TERM" })
+        .arg("--")
+        .args(ids.iter().map(u32::to_string))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -195,28 +198,9 @@ fn stop_running(s: &Stop) -> Result<String, Refused> {
     }
 }
 
-/// `s` as a pattern (POSIX extended) matching only itself.
-#[cfg_attr(windows, allow(dead_code))]
-fn literal(s: &str) -> String {
-    s.chars().fold(String::new(), |mut out, c| {
-        if r".[]()^$*+?{}|\".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
-        out
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_process_name_is_closed_as_itself_never_as_a_pattern() {
-        assert_eq!(literal("obs.bin"), r"obs\.bin");
-        assert_eq!(literal("a.+(x)[y]{2}^$"), r"a\.\+\(x\)\[y\]\{2\}\^\$");
-        assert_eq!(literal("game"), "game");
-    }
 
     #[test]
     fn the_limit_holds_a_minute() {

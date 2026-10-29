@@ -11,7 +11,7 @@ use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type Hinternet = *mut c_void;
 
@@ -222,7 +222,10 @@ fn read(ws: Hinternet, tx: &SyncSender<Result<String, Down>>) -> Down {
                     return Down::Failed("the server sent too much at once".into());
                 }
                 if kind == UTF8_MESSAGE {
-                    let text = String::from_utf8(std::mem::take(&mut msg)).unwrap_or_default();
+                    // As the Unix client does (ws.rs): text that is not UTF-8 ends the connection.
+                    let Ok(text) = String::from_utf8(std::mem::take(&mut msg)) else {
+                        return Down::Failed("the server sent text that is not UTF-8".into());
+                    };
                     if tx.send(Ok(text)).is_err() {
                         return Down::Failed("the connection ended".into());
                     }
@@ -267,6 +270,9 @@ impl Link for WinLink {
     }
 }
 
+// How long a drop waits for the reader to finish after asking the server to close.
+const DROP_WAIT: Duration = Duration::from_secs(3);
+
 impl Drop for WinLink {
     fn drop(&mut self) {
         // The server is asked to close; its answer, or the connection ending,
@@ -276,6 +282,20 @@ impl Drop for WinLink {
         {
             // SAFETY: the socket is open, and cannot be closed while the lock is held.
             unsafe { WinHttpWebSocketShutdown(s.ws, 1000, null(), 0) };
+        }
+        // Then the reader is waited for, a while: frames still coming are taken,
+        // so it is never stuck on a full channel, and its channel ends with it.
+        // The socket stays the reader's to close (see the top of the file).
+        let until = Instant::now() + DROP_WAIT;
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match self.frames.recv_timeout(left) {
+                Ok(_) => continue,
+                Err(_) => break,
+            }
         }
     }
 }

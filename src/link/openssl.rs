@@ -1,4 +1,4 @@
-//! TLS on Linux: the system's OpenSSL 3, opened while running. The
+//! TLS on Linux: the system's OpenSSL 3 or 4, opened while running. The
 //! certificate is checked against the system's roots (or SSL_CERT_FILE) and
 //! the name, TLS 1.2 or newer.
 
@@ -49,8 +49,16 @@ struct Api {
 fn api() -> Option<&'static Api> {
     static API: OnceLock<Option<Api>> = OnceLock::new();
     API.get_or_init(|| {
-        let lib = Lib::open(&["libssl.so.3"])?;
-        // SAFETY: each type is the function's signature in OpenSSL 3.
+        // OpenSSL 3 first; 4 keeps every call used here as 3 has it, so it is
+        // taken once it says it is 3 or 4 (OpenSSL_version_num: the major
+        // number in the top four bits).
+        let lib = Lib::open(&["libssl.so.3", "libssl.so.4"])?;
+        // SAFETY: OpenSSL_version_num's signature since 1.1.0.
+        let version: unsafe extern "C" fn() -> c_ulong = unsafe { lib.get("OpenSSL_version_num")? };
+        if !matches!(unsafe { version() } >> 28, 3 | 4) {
+            return None;
+        }
+        // SAFETY: each type is the function's signature in OpenSSL 3 and 4.
         let api = unsafe {
             Api {
                 client_method: lib.get("TLS_client_method")?,
@@ -114,7 +122,7 @@ impl Drop for Tls {
 
 /// TLS on `tcp`, for `host`, verified.
 pub fn connect(host: &str, tcp: TcpStream) -> Result<Tls, Down> {
-    let api = api().ok_or_else(|| Down::Failed("OpenSSL 3 (libssl.so.3) is not installed on this PC".into()))?;
+    let api = api().ok_or_else(|| Down::Failed("OpenSSL 3 or 4 (libssl.so.3 or libssl.so.4) is not installed on this PC".into()))?;
     let name = CString::new(host).map_err(|_| Down::Failed("bad host".into()))?;
     tcp.set_read_timeout(Some(Duration::from_secs(10))).map_err(|e| Down::Failed(e.to_string()))?;
     // SAFETY: every pointer is checked before use and freed by Tls's drop

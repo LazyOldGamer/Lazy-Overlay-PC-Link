@@ -1,5 +1,7 @@
 //! Small system helpers shared by the modules.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// Windows: DLLs only from the system's own folder, never from beside the
 /// program (a Downloads folder) or the current one, so a DLL planted there
 /// is not loaded. The ones it imports are kept there by its build (build.rs).
@@ -19,6 +21,96 @@ pub fn harden() {
             SetDllDirectoryW(empty.as_ptr());
         }
     }
+}
+
+/// Asked from outside to end: the window closed by another program (a
+/// script's CloseMainWindow, Task Manager), or SIGTERM, SIGINT or SIGHUP.
+static ENDING: AtomicBool = AtomicBool::new(false);
+
+/// Whether PC Link was asked from outside to end; it then ends at once, not
+/// kept by the clock and without asking.
+pub fn ending() -> bool {
+    ENDING.load(Ordering::SeqCst)
+}
+
+/// Marks PC Link as asked from outside to end.
+pub fn end_asked() {
+    ENDING.store(true, Ordering::SeqCst);
+}
+
+/// Linux: SIGTERM, SIGINT and SIGHUP mark it asked to end, and `wake` is
+/// called (from a thread of its own) so the window ends as when closed. A
+/// second signal ends it at once.
+#[cfg(unix)]
+pub fn end_on_signal(wake: impl Fn() + Send + 'static) {
+    unsafe extern "C" {
+        fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+        fn _exit(code: i32) -> !;
+    }
+    // Only what is safe in a signal handler: an atomic, and _exit.
+    extern "C" fn heard(_: i32) {
+        if ENDING.swap(true, Ordering::SeqCst) {
+            // SAFETY: async-signal-safe; asked twice, it ends now.
+            unsafe { _exit(1) }
+        }
+    }
+    // SAFETY: the handler above, for three plain signals.
+    unsafe {
+        for sig in [1, 2, 15] {
+            signal(sig, heard);
+        }
+    }
+    std::thread::spawn(move || {
+        while !ending() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        wake();
+    });
+}
+
+/// Windows: the window's close is heard before the window sees it. One from
+/// another program (no SC_CLOSE first: not its close button, Alt+F4 or the
+/// taskbar's Close) marks PC Link asked to end. Called once, on the
+/// window's own thread.
+#[cfg(windows)]
+pub fn end_on_close(hwnd: isize) {
+    use std::sync::atomic::AtomicIsize;
+    const GWLP_WNDPROC: i32 = -4;
+    const WM_CLOSE: u32 = 0x0010;
+    const WM_SYSCOMMAND: u32 = 0x0112;
+    const SC_CLOSE: usize = 0xF060;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+        fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, w: usize, l: isize) -> isize;
+    }
+    /// The window's own procedure, called after this one.
+    static PREVIOUS: AtomicIsize = AtomicIsize::new(0);
+    /// Inside the window's SC_CLOSE: the close that follows is the streamer's.
+    static BY_HAND: AtomicBool = AtomicBool::new(false);
+    unsafe extern "system" fn heard(hwnd: isize, msg: u32, w: usize, l: isize) -> isize {
+        let previous = PREVIOUS.load(Ordering::SeqCst);
+        // SAFETY: the window's own procedure, with the arguments Windows gave.
+        let pass = || unsafe { CallWindowProcW(previous, hwnd, msg, w, l) };
+        if msg == WM_SYSCOMMAND && w & 0xfff0 == SC_CLOSE {
+            BY_HAND.store(true, Ordering::SeqCst);
+            let result = pass();
+            BY_HAND.store(false, Ordering::SeqCst);
+            return result;
+        }
+        if msg == WM_CLOSE && !BY_HAND.load(Ordering::SeqCst) {
+            end_asked();
+        }
+        pass()
+    }
+    if hwnd == 0 || PREVIOUS.load(Ordering::SeqCst) != 0 {
+        return;
+    }
+    let hook: unsafe extern "system" fn(isize, u32, usize, isize) -> isize = heard;
+    // SAFETY: this thread's own window, so no message comes in between: its
+    // procedure is kept as ours takes its place, and every message is passed
+    // on to it.
+    unsafe { PREVIOUS.store(SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook as usize as isize), Ordering::SeqCst) };
 }
 
 /// A zero-terminated UTF-16 string, for Windows calls.

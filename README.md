@@ -8,10 +8,10 @@ Windows and Linux utility that lets Lazy Overlay start/stop programs, pick or wa
 
 ## Build
 
-Needs Rust 1.89+ ([rustup](https://rustup.rs)).
+Needs Rust 1.99+ ([rustup](https://rustup.rs)).
 
 - **Windows:** Visual Studio Build Tools (C++ workload) and the Windows SDK.
-- **Linux:** a C toolchain; OpenSSL 3 at run time.
+- **Linux:** a C toolchain; OpenSSL 3 or 4 at run time.
 
 ```sh
 cargo build --release   # target/release/lazy-overlay-link(.exe)
@@ -21,5 +21,5 @@ cargo test
 Windows installer (optional, [Inno Setup](https://jrsoftware.org/isinfo.php) 7):
 
 ```sh
-iscc /DVersion=1.0.0 installer/pclink.iss
+iscc /DVersion=1.0.1 installer/pclink.iss
 ```

@@ -1,9 +1,9 @@
 # Lazy Overlay PC Link: see README.md.
 [package]
 name = "lazy-overlay-link"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.99"
 publish = false
 description = "Lazy Overlay PC Link: the overlay's way onto the streamer's PC, limited to what the streamer lists there"
 
@@ -22,6 +22,10 @@ path = "src/main.rs"
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 rfd = "0.17"
 arboard = { version = "3", default-features = false }
+
+# Windows: the window's handle, to hear another program close it.
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

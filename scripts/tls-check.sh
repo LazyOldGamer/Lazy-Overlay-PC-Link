@@ -10,7 +10,7 @@
 set -Eeuo pipefail
 bin=$(realpath "$1")
 dir=$(mktemp -d)
-trap 'kill "$server" 2>/dev/null || true; rm -rf "$dir"' EXIT
+trap 'kill "${server:-}" 2>/dev/null || true; rm -rf "$dir"' EXIT
 cd "$dir"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 1 -subj /CN=localhost \
   -addext subjectAltName=DNS:localhost 2>/dev/null
@@ -40,7 +40,12 @@ while True:
     threading.Thread(target=serve, args=(c,), daemon=True).start()
 PY
 server=$!
-sleep 1
+# Up once its port answers, five seconds at most.
+for _ in $(seq 50); do
+  if (exec 3<>/dev/tcp/127.0.0.1/18443) 2>/dev/null; then break; fi
+  sleep 0.1
+done
+(exec 3<>/dev/tcp/127.0.0.1/18443) 2>/dev/null || { echo "FAILED: the stand-in server did not start"; exit 1; }
 
 # run HOST [SSL_CERT_FILE]: PC Link's first lines, for a few seconds.
 run() {
