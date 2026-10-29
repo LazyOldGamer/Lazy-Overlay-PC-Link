@@ -26,7 +26,8 @@ pub fn open_programs() -> Vec<std::path::PathBuf> {
     let me = std::env::current_exe().ok();
     let mut out: Vec<std::path::PathBuf> =
         imp::paths().into_iter().filter(|p| p.is_absolute() && Some(p) != me.as_ref() && !system(p)).collect();
-    out.sort_by_key(|p| p.file_name().map(|f| f.to_string_lossy().to_lowercase()));
+    // By name, then path, so two copies of one path sit together and go as one.
+    out.sort_by_cached_key(|p| (p.file_name().map(|f| f.to_string_lossy().to_lowercase()), p.clone()));
     out.dedup();
     out
 }
@@ -41,11 +42,13 @@ fn system(p: &std::path::Path) -> bool {
     }
 }
 
-/// The ids of every process with this file name (Windows).
-#[cfg(windows)]
+/// The ids of every process with this file name, matched as `running` does.
 pub fn ids(name: &str) -> io::Result<Vec<u32>> {
     let want = key(name);
-    Ok(imp::all()?.into_iter().filter(|(_, n)| *n == want).map(|(id, _)| id).collect())
+    let mut ids: Vec<u32> = imp::all()?.into_iter().filter(|(_, n)| *n == want).map(|(id, _)| id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
 }
 
 #[cfg(windows)]
@@ -147,14 +150,19 @@ mod imp {
         fs::read_dir("/proc").map(|d| d.flatten().filter_map(|e| fs::read_link(e.path().join("exe")).ok()).collect()).unwrap_or_default()
     }
 
-    // Each process's file: its first argument's last part, and its comm.
     pub fn running() -> io::Result<HashSet<String>> {
-        let mut out = HashSet::new();
+        Ok(all()?.into_iter().map(|(_, n)| n).collect())
+    }
+
+    // Each process's names, as `key` writes them, with its id: its first
+    // argument's last part, and its comm.
+    pub fn all() -> io::Result<Vec<(u32, String)>> {
+        let mut out = Vec::new();
         for entry in fs::read_dir("/proc")?.flatten() {
             let name = entry.file_name();
-            if !name.to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+            let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
                 continue;
-            }
+            };
             let dir = entry.path();
             // Its first 4 KB: a command line can be megabytes, read every 2 seconds.
             let mut c = Vec::new();
@@ -166,10 +174,10 @@ mod imp {
                 (!base.is_empty()).then_some(base)
             });
             if let Some(n) = argv0 {
-                out.insert(key(&n));
+                out.push((pid, key(&n)));
             }
             if let Ok(comm) = fs::read_to_string(dir.join("comm")) {
-                out.insert(key(comm.trim_end()));
+                out.push((pid, key(comm.trim_end())));
             }
         }
         Ok(out)

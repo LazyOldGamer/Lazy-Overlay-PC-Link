@@ -9,6 +9,9 @@ use std::sync::Arc;
 pub enum Click {
     Open,
     Quit,
+    /// Another program closed PC Link while hidden by the clock (a script's
+    /// CloseMainWindow, Task Manager): it ends now, without asking.
+    End,
 }
 
 /// Told each click, from the icon's own thread.
@@ -131,6 +134,12 @@ mod imp {
     const WM_WAKE: u32 = 0x8000 + 2;
     const SMTO_ABORTIFHUNG: u32 = 0x2;
     const WM_NULL: u32 = 0;
+    const WM_CLOSE: u32 = 0x0010;
+    const WS_POPUP: u32 = 0x8000_0000;
+    const WS_EX_TOOLWINDOW: u32 = 0x80;
+    const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
+    const SW_HIDE: i32 = 0;
+    const SW_SHOWNA: i32 = 8;
     const WM_LBUTTONUP: u32 = 0x0202;
     const WM_RBUTTONUP: u32 = 0x0205;
     const MF_STRING: u32 = 0;
@@ -263,6 +272,7 @@ mod imp {
         fn DestroyMenu(menu: Handle) -> i32;
         fn GetCursorPos(point: *mut Point) -> i32;
         fn SetForegroundWindow(hwnd: Hwnd) -> i32;
+        fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32;
     }
 
     #[link(name = "gdi32")]
@@ -414,7 +424,7 @@ mod imp {
         /// Sent to every window when Explorer restarts: the icon is added again.
         static TASKBAR_CREATED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         /// Explorer restarted since the loop last looked.
-        static READD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static ADD_AGAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     // A left click on the icon opens the window, a right click its menu; a
@@ -447,9 +457,19 @@ mod imp {
                 None => 0,
             };
         }
+        // Another program's close (CloseMainWindow finds this window while
+        // PC Link is hidden by the clock): PC Link ends, the window is kept
+        // until then.
+        if msg == WM_CLOSE {
+            crate::os::end_asked();
+            if let Some(on_click) = on_click() {
+                on_click(Click::End);
+            }
+            return 0;
+        }
         // Added again by the loop, outside any borrow.
         if msg != 0 && msg == TASKBAR_CREATED.get() {
-            READD.set(true);
+            ADD_AGAIN.set(true);
             return 0;
         }
         // SAFETY: the arguments Windows gave, passed on.
@@ -542,8 +562,10 @@ mod imp {
     fn run(rx: mpsc::Receiver<Ask>) {
         let class = wide(CLASS);
         let name = wide(TIP);
-        // SAFETY: this thread's class and hidden window, for good: a top-level
-        // one, never shown, so the icon's menu can come forward. The strings
+        // SAFETY: this thread's class and window, for good: a top-level one,
+        // so the icon's menu can come forward. Never seen: no size, kept off
+        // the taskbar and never active; shown only while PC Link is hidden by
+        // the clock, so a script's CloseMainWindow finds it. The strings
         // outlive the calls; a null module is the system's own icons.
         let (hwnd, icon) = unsafe {
             let instance = GetModuleHandleW(std::ptr::null());
@@ -561,8 +583,21 @@ mod imp {
             };
             RegisterClassW(&wc);
             TASKBAR_CREATED.set(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()));
-            let hwnd =
-                CreateWindowExW(0, class.as_ptr(), name.as_ptr(), 0, 0, 0, 0, 0, 0, std::ptr::null_mut(), instance, std::ptr::null_mut());
+            let ex = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+            let hwnd = CreateWindowExW(
+                ex,
+                class.as_ptr(),
+                name.as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                instance,
+                std::ptr::null_mut(),
+            );
             // The small size the taskbar's corner shows, so the mark is drawn at it.
             let small = GetSystemMetrics(SM_CXSMICON).max(16);
             let own = LoadImageW(instance, OWN_ICON as *const u16, IMAGE_ICON, small, small, 0);
@@ -624,6 +659,8 @@ mod imp {
                     Ok(Ask::Keep(on)) => {
                         i.kept = on;
                         i.sync();
+                        // SAFETY: this thread's own window.
+                        unsafe { ShowWindow(i.data.hwnd, if on { SW_SHOWNA } else { SW_HIDE }) };
                     }
                     Ok(Ask::Status(mark, words)) => {
                         (i.mark, i.words) = (mark, words);
@@ -637,7 +674,7 @@ mod imp {
                     }
                     Err(_) => {}
                 }
-                if READD.take() {
+                if ADD_AGAIN.take() {
                     i.added = false;
                     i.sync();
                 }

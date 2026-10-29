@@ -97,6 +97,21 @@ pub fn open(path: PathBuf, minimized: bool) -> ! {
         Box::new(move |cc| {
             style(&cc.egui_ctx);
             let ctx = cc.egui_ctx.clone();
+            // Closed by another program, or a signal: ends as when closed.
+            #[cfg(windows)]
+            {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(h) = cc.window_handle()
+                    && let RawWindowHandle::Win32(w) = h.as_raw()
+                {
+                    os::end_on_close(w.hwnd.get());
+                }
+            }
+            #[cfg(unix)]
+            {
+                let c = ctx.clone();
+                os::end_on_signal(move || c.request_repaint());
+            }
             let (s, p, c) = (shared.clone(), path.clone(), ctx.clone());
             std::thread::spawn(move || {
                 service::run(
@@ -264,6 +279,9 @@ struct Gui {
     programs: Vec<Program>,
     folders: Vec<Folder>,
     filewatches: Vec<FileWatch>,
+    /// Whether each watched path is a folder, asked once: the table is drawn
+    /// every frame, and a network path can take a while to answer.
+    dirs: std::collections::HashMap<std::path::PathBuf, bool>,
     shared: Arc<Mutex<Shared>>,
     /// The file could not be read: nothing is saved over it.
     broken: Option<Vec<String>>,
@@ -287,7 +305,7 @@ struct Gui {
     startup: String,
     starts: bool,
     startup_error: Option<String>,
-    /// Minimize on the first frame (started with Windows).
+    /// Minimize on the first frame (started with Windows, or ticked).
     minimize: bool,
     /// The icon's last click, or PC Link opened again, from the icon's thread.
     clicked: Arc<Mutex<Option<Click>>>,
@@ -322,12 +340,14 @@ impl Gui {
         let own = (config::settings_path().as_ref() != Some(&path)).then_some(path.as_path());
         let startup = std::env::current_exe().map(|exe| autostart::command(&exe, own)).unwrap_or_default();
         let starts = autostart::starts(autostart::saved().as_deref(), &startup);
+        let minimize = minimize || cfg.window.start_minimized;
         Gui {
             path,
             cfg,
             programs,
             folders,
             filewatches,
+            dirs: Default::default(),
             shared,
             broken,
             page,
@@ -373,6 +393,7 @@ impl Gui {
             self.programs = cfg.programs();
             self.chosen = self.chosen.map(|i| i.min(self.programs.len().saturating_sub(1))).filter(|_| !self.programs.is_empty());
             (self.folders, self.filewatches) = (cfg.folders.clone(), cfg.filewatches.clone());
+            self.dirs.clear();
             self.cfg = cfg;
             self.broken = None;
         }
@@ -475,7 +496,7 @@ impl Gui {
         self.programs = order.iter().map(|&i| self.programs[i].clone()).collect();
     }
 
-    // The connection in a word or two, its colour, and a line more.
+    // The connection in a word or two, its color, and a line more.
     fn status_words(&self) -> (Color32, String, String) {
         let status = self.shared.lock().ok().and_then(|s| s.status.clone());
         match &status {
@@ -531,7 +552,6 @@ impl Gui {
         });
     }
 
-    // Whether an entry is left out of the file for its name.
     // Whether something here is left out of the file: a name, or what a
     // ticked program needs, or a path the file can't hold.
     fn unsaved(&self) -> bool {
@@ -944,7 +964,7 @@ impl Gui {
             for (i, f) in self.filewatches.iter_mut().enumerate() {
                 changed |= name_cell(ui, &mut f.name, kept(&names, i));
                 path_cell(ui, &f.path);
-                if f.path.is_dir() {
+                if *self.dirs.entry(f.path.clone()).or_insert_with(|| f.path.is_dir()) {
                     changed |= ui.checkbox(&mut f.subfolders, "Include").changed();
                     let field = egui::TextEdit::singleline(&mut f.matching).desired_width(110.0).char_limit(config::MAX_MATCH);
                     changed |= ui.add_sized([110.0, 24.0], field.hint_text("any, or .mp4")).changed();
@@ -1020,6 +1040,8 @@ impl Gui {
             changed |= ui.checkbox(&mut w.minimize_to_tray, "Minimize it to the clock too").on_hover_text(hint).changed();
         }
         changed |= ui.checkbox(&mut w.confirm_close, "Ask before closing PC Link").changed();
+        let hint = if tray::supported() && (w.close_to_tray || w.minimize_to_tray) { "To its icon by the clock" } else { "To the taskbar" };
+        changed |= ui.checkbox(&mut w.start_minimized, "Start PC Link minimized").on_hover_text(hint).changed();
         if changed {
             self.changed();
         }
@@ -1279,7 +1301,15 @@ impl eframe::App for Gui {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             }
         }
-        match self.clicked.lock().ok().and_then(|mut c| c.take()) {
+        let click = self.clicked.lock().ok().and_then(|mut c| c.take());
+        // Asked from outside (a script, Task Manager, a signal): ends now,
+        // not kept by the clock and without asking.
+        if (os::ending() || click == Some(Click::End)) && !self.quitting {
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        match click {
+            Some(Click::Open) if self.quitting => {}
             Some(Click::Open) => self.show_from_tray(ctx),
             // Asked in the window, brought back for it.
             Some(Click::Quit) if w.confirm_close => {
@@ -1290,7 +1320,7 @@ impl eframe::App for Gui {
                 self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            None => {}
+            Some(Click::End) | None => {}
         }
         if !self.quitting && ctx.input(|i| i.viewport().close_requested()) {
             if tray {

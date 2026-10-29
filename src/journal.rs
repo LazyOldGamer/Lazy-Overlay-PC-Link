@@ -35,6 +35,10 @@ fn open(path: &Path) -> Option<std::fs::File> {
     {
         use std::os::unix::fs::OpenOptionsExt;
         // Never through a link someone put in its place.
+        // Linux's value, which differs by architecture.
+        #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+        const O_NOFOLLOW: i32 = 0o100000;
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
         const O_NOFOLLOW: i32 = 0o400000;
         open.mode(0o600).custom_flags(O_NOFOLLOW);
     }

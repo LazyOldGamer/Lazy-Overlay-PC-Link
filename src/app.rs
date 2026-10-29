@@ -12,6 +12,8 @@ use crate::toast;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Where the connection stands.
@@ -70,6 +72,9 @@ pub fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// What a look at each [filewatch] found, and the watch.
+type Looked = Vec<(Option<HashMap<PathBuf, files::Stamp>>, config::FileWatch)>;
+
 /// What a look at pclink.ini found.
 #[derive(Debug, PartialEq)]
 enum Saved {
@@ -80,6 +85,8 @@ enum Saved {
     Quiet,
     /// Saved, only [window] changed.
     WindowOnly,
+    /// Saved with mistakes: the last settings stay.
+    Bad,
 }
 
 pub struct App {
@@ -98,6 +105,8 @@ pub struct App {
     watchers: HashMap<(String, PathBuf, String), Watcher>,
     /// Watches already said to be unreadable.
     unreadable: HashSet<String>,
+    /// The [filewatch] look in progress, on a thread of its own.
+    looking: Option<Receiver<Looked>>,
     next_id: u64,
     emit: Emit,
 }
@@ -118,6 +127,7 @@ impl App {
             picker: Picker::default(),
             watchers: HashMap::new(),
             unreadable: HashSet::new(),
+            looking: None,
             next_id: 0,
             emit,
         }
@@ -217,13 +227,41 @@ impl App {
         }
     }
 
-    // What changed in each [filewatch], told up to FILES_PER_MINUTE.
+    // The [filewatch]es are looked at on a thread of their own: a slow or
+    // offline share can take seconds, and commands and pings must not wait.
+    // What it found is told on the next poll; a look still running is left
+    // to finish before another starts.
     fn look_at_files(&mut self, link: &mut dyn Link) -> Result<(), Down> {
+        if let Some(rx) = &self.looking {
+            match rx.try_recv() {
+                Ok(found) => {
+                    self.looking = None;
+                    self.tell_files(link, found)?;
+                }
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => self.looking = None,
+            }
+        }
+        if !self.cfg.filewatches.is_empty() {
+            let watches = self.cfg.filewatches.clone();
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = tx.send(watches.into_iter().map(|w| (files::look(&w), w)).collect());
+            });
+            self.looking = Some(rx);
+        }
+        Ok(())
+    }
+
+    // What changed in each [filewatch], told up to FILES_PER_MINUTE.
+    fn tell_files(&mut self, link: &mut dyn Link, found: Looked) -> Result<(), Down> {
         let key = |w: &config::FileWatch| (w.name.clone(), w.path.clone(), w.matching.to_lowercase());
         let keep: HashSet<_> = self.cfg.filewatches.iter().map(key).collect();
         self.watchers.retain(|k, _| keep.contains(k));
-        for w in self.cfg.filewatches.clone() {
-            let now = files::look(&w);
+        for (now, w) in found {
+            if !keep.contains(&key(&w)) {
+                continue;
+            }
             if now.is_none() {
                 if self.unreadable.insert(w.name.clone()) {
                     self.say(format!(
@@ -263,10 +301,11 @@ impl App {
     /// Takes pclink.ini again if it was saved; whether it was, beyond how the
     /// window looks (a save of the same settings counts: "Use PC Link on this
     /// computer").
+    /// A save with mistakes is not one: a link the user stopped stays stopped.
     pub fn refresh(&mut self) -> bool {
         let before = self.stamp;
-        let window_only = matches!(self.reload(), Ok(Saved::WindowOnly));
-        self.stamp != before && !window_only
+        let ignored = matches!(self.reload(), Ok(Saved::WindowOnly | Saved::Bad));
+        self.stamp != before && !ignored
     }
 
     // pclink.ini saved: taken if it reads. The server is told again, and the
@@ -297,7 +336,7 @@ impl App {
             Err(errors) => {
                 self.say(format!("{} has mistakes, so the last settings stay: {}", config::FILE_NAME, errors.join("; ")));
                 (self.emit)(Event::Status(Status::BadFile(errors)));
-                Ok(Saved::Quiet)
+                Ok(Saved::Bad)
             }
         }
     }
@@ -453,6 +492,11 @@ mod tests {
         assert!(!app.refresh(), "only [window]");
         save(&cfg);
         assert!(app.refresh(), "the same again: a nudge");
+        std::fs::write(&path, "not a line\n").unwrap();
+        saves.set(saves.get() + 1);
+        let t = SystemTime::now() + Duration::from_secs(saves.get());
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(t).unwrap();
+        assert!(!app.refresh(), "a save with mistakes changes nothing");
         cfg.toasts.actions = false;
         save(&cfg);
         assert_eq!(app.reload().unwrap(), Saved::Told);
